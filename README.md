@@ -1,12 +1,16 @@
 # Voice AI Agent Studio
 
-A local platform for creating, configuring, and talking to custom voice agents. The browser captures speech, a FastAPI service runs the turn (speech-to-text, Azure OpenAI, Edge TTS), and the Next.js UI plays the audio back while an SVG avatar follows playback.
+A local platform for creating, configuring, and talking to custom voice agents. The browser captures speech, a FastAPI service runs the turn, and the Next.js UI plays audio while an SVG avatar follows playback.
 
-This repository is a personal project. It does not ship with measured latency numbers, a hosted demo, or user counts.
+With no API keys the process uses a fake streaming language model and short WAV clips, so the loop still runs. Set `LLM_PROVIDER=azure` or `openai`, and `TTS_PROVIDER=edge`, when you want the real providers.
+
+This repository is a personal project. It does not ship with a hosted demo or user counts. The only timings in the repo are from `scripts/bench_latency.py`, and that script says they are synthetic.
 
 ## Architecture
 
-The default session uses the browser Web Speech API. Deepgram is used only when the client sends `stt_mode: "deepgram"`.
+The client asks for Deepgram (`stt_mode: "deepgram"`). If `DEEPGRAM_API_KEY` is empty, the server answers `stt_mode: "browser"` and the playground keeps the Web Speech API. With a key, Deepgram is the recognizer and `SpeechStarted` barges in.
+
+LLM tokens and TTS overlap. A producer splits text into sentences (the first piece can be as short as 12 characters) and queues them. A consumer synthesizes the queue while later tokens are still arriving. Edge TTS yields MP3 fragments as they arrive. The fake provider yields complete WAV chunks. The avatar switches to speaking when playback actually starts.
 
 ```mermaid
 flowchart LR
@@ -56,33 +60,25 @@ Deepgram mode forwards PCM16 to a per-session WebSocket (`interim_results`, `end
 
 ## What is implemented
 
-- Voice WebSocket at `/api/v1/ws/voice`: session start/end, ping, interrupt, config update (logged only), binary audio, browser transcripts.
-- Streaming Azure OpenAI replies with sentence-level TTS and client playback.
-- Explicit interrupt: the `interrupt` frame cancels the LLM task and `AudioPlayer.stop()` clears queued audio. The playground does not call `sendInterrupt`. A new final transcript cancels server generation but does not flush audio already queued in the browser.
-- Four in-memory presets (`default`, `concise`, `creative`, `technical`) plus agents loaded from PostgreSQL by UUID or slug.
-- Agent HTTP API: create, list, get, update, delete, duplicate, publish, versions, rollback, analytics, templates, voice catalog. The Next.js agent pages call create, list, get, update, publish, delete, versions, rollback, voices, and analytics. Duplicate and templates are API-only.
-- Immutable `agent_versions.config_snapshot` JSON. A new row is written on create, on duplicate, on update when `change_note` is set, and on rollback. Rollback copies the snapshot onto the live row and appends a new version. There is no update API for an existing snapshot.
-- Built-in tools: `get_current_time`, `get_weather` (fixed sample cities, otherwise a hash of the name), `calculator`.
-- Conversation persistence: session row, user message, assistant message with a chunk count and total turn latency.
-- Optional Redis. `USE_REDIS=false` (the default) uses an in-process store. Redis pub/sub fan-out starts only when Redis is enabled.
-- JWT register, login, refresh, and `/me`. `AUTH_ENABLED` defaults to false, and agent, conversation, and voice routes do not require a token.
-- Health, readiness, and WebSocket connection metrics.
-- Alembic migrations for the tables in `backend/app/models`.
+- Voice WebSocket at `/api/v1/ws/voice`. The client requests Deepgram. Without a key the server falls back to browser captions. `SpeechStarted` and the Interrupt button cancel the LLM task, the TTS consumer, and queued audio.
+- Overlapping LLM and TTS. Stage timings (`stt_ms`, `llm_first_token_ms`, `tts_first_byte_ms`, `total_ms`) go out on `latency_report` and are stored on the assistant message.
+- Per-session model, temperature, and max tokens. `LLM_PROVIDER` is `azure`, `openai`, or `fake` (`auto` picks Azure, then OpenAI, then fake).
+- Memory window, approximate token budget, and an optional extractive summary of dropped turns. A resumed session reloads messages from Postgres. Session fields are written to Redis when `USE_REDIS=true`.
+- Tools: empty `enabled_tools` allows nothing; `allow_all: true` allows every registered tool. The executor checks the list again, applies a timeout, and writes `tool_audit_logs`. Weather uses Open-Meteo. The calculator walks an AST.
+- Azure, OpenAI, Deepgram, and Edge TTS calls retry with backoff and a timeout. Failures raise `LLMError`, `STTError`, or `TTSError` and the socket gets a recoverable error.
+- Agent API: create, list, get, update, delete, duplicate, publish, versions, rollback, analytics, templates, voices. Every update and every publish writes a new snapshot. Rollback copies a snapshot forward. Duplicate and marketplace clone set `slug` and `created_by` when the caller id is a UUID.
+- `CallLog` is inserted when the session used a saved agent. `total_calls` increments. Analytics p50/p95 are computed from those turn totals. The calls page and the analytics dashboard read that data.
+- JWT register, login, refresh, `/me`. `AUTH_ENABLED=true` requires a Bearer token on agent, call, and analytics routes, and `?token=` on the voice socket. Passwords are bcrypt. Tokens are PyJWT. There is no SHA-256 fallback.
+- Health, readiness, and socket metrics.
 
-## What is stored but not executed
+## What is still not executed
 
-These routes and screens exist. They are not part of the live voice path.
-
-- `memory_config` is saved on the agent and edited in the UI. `LLMService.trim_history` is never called. Nothing summarizes history or reads `max_context_tokens`.
-- Per-agent `llm_model`, `temperature`, `max_tokens`, and `top_p` are stored. The Azure client uses the process-wide settings in `config.py`.
-- `CallLog` is read by analytics. Nothing in this repo inserts a row or increments `Agent.total_calls`. Analytics returns `latency_p50_ms: 0`, `latency_p95_ms: 0`, and `top_intents: []`.
-- Knowledge bases can be created. Document upload writes a placeholder row named `uploaded_document.pdf` and does not read a file. Search returns stored chunks with synthetic scores. Embeddings are a JSONB column. `pgvector` is created in `infra/postgres/init.sql` and is not queried.
-- Workflow CRUD stores a graph. `POST /workflows/{id}/execute` inserts a row with status `running` and does not run nodes. The workflow page is local React state and does not call the API.
-- Evaluations and call replays store the JSON you post. There is no judge model call. The evaluations, calls, coaching, knowledge, and marketplace pages render hardcoded arrays.
-- Marketplace publish, browse, rate, and clone hit the database. Clone does not set `slug` (the column is non-null) and reads `agent.user_id`, which is not a field on `Agent` (`created_by` is). Publishing sets status `pending`, while browse only returns `published`.
-- `CONFIG_UPDATE` on the socket is logged. The comment in `voice.py` marks it TODO.
-- `require_admin` is unused. `RateLimitError` is unused. Prometheus and OpenTelemetry packages are dependencies and are not wired up.
-- Password hashing falls back to unsalted SHA-256 if `bcrypt` is not installed. `pyproject.toml` does not depend on `bcrypt` or PyJWT; `security.py` tries `bcrypt`, then PyJWT, then `python-jose`.
+- Knowledge upload does not read a file. Search does not embed. The knowledge screen says coming soon.
+- Workflow execute inserts a `running` row and does not walk the graph. The canvas is hidden.
+- Evaluations store posted scores. Nothing calls a judge model. Coaching is not implemented. Those screens say coming soon.
+- Marketplace publish stores `pending`. Browse returns only `published`. Nothing in the app flips that status. The screen says coming soon.
+- `CONFIG_UPDATE` is still only logged. `require_admin` is unused. `top_p` is stored and not sent to the model. Prometheus and OpenTelemetry packages are not wired. The extractive memory note is not a second model call.
+- `top_intents` is still an empty list. Ratings on `Agent.avg_rating` are not updated by the voice path.
 
 ## Tech stack
 
@@ -145,12 +141,16 @@ Copy `.env.example`. Names match `backend/app/config.py`.
 | `DATABASE_URL` | `postgresql+asyncpg://...` Required if `POSTGRES_PASSWORD` is empty. |
 | `POSTGRES_*` | Used to build `DATABASE_URL` when that variable is empty. |
 | `USE_REDIS` | `false` uses memory. `true` connects to `REDIS_URL`. |
-| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION` | LLM client. Empty key means the voice turn fails when a transcript arrives. |
-| `AZURE_OPENAI_MAX_TOKENS`, `AZURE_OPENAI_TEMPERATURE` | Process-wide generation settings. |
-| `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_LANGUAGE`, `DEEPGRAM_SAMPLE_RATE` | Used only for Deepgram sessions. |
+| `LLM_PROVIDER` | `auto` (default), `azure`, `openai`, or `fake`. |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Used when the provider is OpenAI. |
+| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION` | Used when the provider is Azure. Per-agent `llm_model` overrides the deployment or model name. |
+| `AZURE_OPENAI_MAX_TOKENS`, `AZURE_OPENAI_TEMPERATURE` | Defaults when the agent row does not set them. |
+| `LLM_TIMEOUT_S`, `LLM_MAX_RETRIES`, `TTS_TIMEOUT_S`, `TTS_MAX_RETRIES`, `TOOL_TIMEOUT_S` | Retry and timeout budgets. |
+| `TTS_PROVIDER` | `auto` uses Edge TTS. `fake` yields WAV clips. |
+| `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_LANGUAGE`, `DEEPGRAM_SAMPLE_RATE` | Required for the Deepgram path. Missing key falls back to the browser. |
 | `EDGE_TTS_VOICE`, `EDGE_TTS_RATE`, `EDGE_TTS_VOLUME`, `EDGE_TTS_PITCH` | Defaults when the agent row does not override them. |
 | `JWT_SECRET_KEY` | Required outside development. |
-| `AUTH_ENABLED` | `false` makes `/api/v1/auth/me` return a dummy admin. Other routes do not check it. |
+| `AUTH_ENABLED` | `false` by default. `true` protects agent, call, analytics, and the voice socket. |
 | `INSECURE_SKIP_TLS_VERIFY` | Default `false`. `true` disables certificate checks for Edge TTS and Deepgram. |
 | `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_WS_URL` | Browser endpoints. |
 
@@ -210,29 +210,57 @@ docs/latency-instrumentation.md
 ## Tests
 
 ```bash
-cd backend && python -m pytest tests/ -v --tb=short
-cd backend && ruff check . && ruff format --check .
+cd backend && python -m pytest tests/ -q --tb=short
+cd backend && python ../scripts/bench_latency.py --turns 20
 ```
 
-Present today:
+`tests/conftest.py` forces `LLM_PROVIDER=fake` and `TTS_PROVIDER=fake`. The suite covers sentence splitting, tool policy, the AST calculator, memory trim, pipeline ordering, barge-in cancellation, and a WebSocket round trip against Postgres. GitHub Actions runs ruff on the Python files changed from `main`, pytest, and the frontend lint and build.
 
-- `tests/test_health.py` checks `/api/v1/health` and `/api/v1/metrics`.
-- `tests/test_websocket_manager.py` checks connect, replace, cancel, and metrics.
-- `tests/test_config.py` checks that the database credential and production JWT secret are required.
+The benchmark prints p50 time-to-first-audio for a sequential full-buffer simulation and for this pipeline. Both use `asyncio.sleep` inside the fake providers. Those numbers are not Azure or Edge latency. One local run of 8 turns at 5 ms per token and 8 ms per TTS chunk, 3 chunks, reported sequential TTFA p50 102.6 ms, concurrent TTFA p50 40.2 ms, and about 2.2 ms of pipeline overhead past the expected sleeps. Re-run the script before quoting it. The header in the output says the numbers are synthetic.
 
-There is no frontend test runner, no Playwright suite, and no test that drives STT, the LLM, or TTS. Those calls need network and API keys.
+## Run a real call with your own keys
+
+```bash
+cp .env.example .env
+```
+
+- Azure: `LLM_PROVIDER=azure`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`
+- OpenAI: `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL`
+- Speech: `DEEPGRAM_API_KEY` for server STT. Leave it empty to stay on browser captions.
+- Voice: `TTS_PROVIDER=edge` (no key). `TTS_PROVIDER=fake` stays offline.
+
+Then start Postgres, run `alembic upgrade head`, and start the two dev servers. Open `/playground`. The typed box works without a microphone. `/playground?agent=<uuid>` is what writes `CallLog` rows.
+
+## Two-minute demo
+
+1. Create an agent, leave allow-all tools on, publish it, and open the playground with that id.
+2. Type "What's the weather in Paris?" Tokens show up before the first audio chunk. The avatar switches to speaking when playback starts. The tool row shows `get_weather`.
+3. While audio is playing, click Interrupt or start talking. Playback stops and the turn is cancelled.
+4. Change the system prompt, save, then roll back to version 1. The prompt returns and the version number increases.
+5. End the session and open Analytics. p50 and p95 come from the turns just stored. Calls lists that session.
+
+## Engineering decisions
+
+- TTS used to be awaited inside the token loop, and Edge TTS buffered a whole MP3 before the first byte. Sentences now queue, and chunks are forwarded as they arrive. The synthetic benchmark is how that difference is shown without a live model.
+- The first sentence can split at 12 characters. Later sentences still wait for about 40.
+- An empty tool list allows nothing. `allow_all: true` is the explicit opt-in. The executor checks the same policy again.
+- Temperature, max tokens, and model are read from the agent when the session client is built.
+- Auth stays off unless `AUTH_ENABLED=true`. When it is on, agent routes and the voice socket both require a token.
+- Screens that are not backed by a real computation say coming soon.
+
+## Debugging stories
+
+- **TTS blocked the token loop.** `_run_llm_tts_pipeline` awaited synthesis before reading the next token, and `synthesize_stream` yielded only after the sentence MP3 was complete. The producer/consumer split and the per-chunk yield are the correction.
+- **`BaseHTTPMiddleware` broke the WebSocket upgrade.** Starlette's HTTP middleware wraps the ASGI call in a way that fails the handshake. `backend/app/core/middleware.py` is raw ASGI and ignores non-HTTP scopes. Voice timings are the `latency_report` event, not `x-response-time-ms`.
+- **An intercepting proxy broke Edge TTS and Deepgram.** The first upload disabled certificate checks and named a corporate proxy in a comment. Verification stays on unless `INSECURE_SKIP_TLS_VERIFY=true`. The name is gone from the working tree and remains in commit `9e1cbac` because history was not rewritten.
 
 ## Roadmap and limitations
 
-Known gaps, in the order they affect a real conversation:
+- Browser barge-in sends `interrupt` on the first interim result while the agent is speaking. Deepgram barge-in uses `SpeechStarted`. This process does not run its own energy VAD.
+- Memory summaries are extractive. They do not call the model.
+- Knowledge retrieval, workflow execution, evaluations, coaching, and the marketplace catalog are not live.
+- `top_intents` and `Agent.avg_rating` are not filled by the voice path.
+- Sockets live in one process. Redis fan-out starts only when `USE_REDIS=true`.
+- `ruff check` on the whole tree still reports older findings. CI lints the Python diff.
 
-- TTS is awaited inside the token loop, and each sentence is a full MP3 before the first byte is sent. See [docs/latency-instrumentation.md](docs/latency-instrumentation.md).
-- The playground never sends `interrupt`, and Deepgram speech-start does not barge in.
-- Agent LLM knobs and memory policy are not applied at runtime.
-- Analytics call metrics are not written by the pipeline.
-- Knowledge search, workflow execution, and LLM-as-judge are storage or UI only.
-- Auth does not cover the agent or voice APIs. `AUTH_ENABLED=false` is the default.
-- TLS verification can be turned off with `INSECURE_SKIP_TLS_VERIFY`. Leave it false.
-- One API process holds sockets in memory. Redis fan-out exists only when `USE_REDIS=true`.
-
-A factual map of what the code does, with file and function citations, is in [docs/case-study-evidence.md](docs/case-study-evidence.md).
+File and function citations are in [docs/case-study-evidence.md](docs/case-study-evidence.md). The timing plan is in [docs/latency-instrumentation.md](docs/latency-instrumentation.md).

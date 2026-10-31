@@ -1,8 +1,38 @@
 # Case-study evidence
 
-Facts from this repository only. Each claim names the function that does the work. "Stored" means a column or route exists. "Runs" means a voice session or HTTP handler executes it.
+Facts from this repository. The pipeline section below describes the code after the streaming change. The security scan is still the one commit on `main`, `9e1cbac`, plus this branch. History was not rewritten.
 
-History scanned: one commit on `main`, `9e1cbac` (`Initial project upload`), plus this branch. No other branches.
+## Current voice path
+
+`voice_websocket` asks for a token only when `AUTH_ENABLED` is true. `AudioPipeline.handle_session_start` requests Deepgram when the client does. A missing `DEEPGRAM_API_KEY` returns `stt_mode: "browser"`. `DeepgramSTTSession` retries the socket three times and calls `on_speech_started`. That callback cancels the turn when the agent is already speaking or generating. The playground Interrupt button calls `sendInterrupt`, which stops `AudioPlayer` and sends `interrupt`. An interim browser caption does the same while `voiceState` is `speaking` or `processing`.
+
+`_run_llm_tts_pipeline` pushes sentences from `split_sentence` onto an `asyncio.Queue` and does not await TTS before the next token. The first piece may split at 12 characters. `_tts_consumer` forwards each Edge TTS chunk, or each fake WAV, with `pack_audio_frame`. `latency_report` carries `stt_ms` (client `client_stt_ms`, or time since the last Deepgram audio byte), `llm_first_token_ms`, `tts_first_byte_ms`, and `total_ms`. The same object is stored on `messages.latency_breakdown`.
+
+`LLMService.create_session` takes the agent's temperature, max tokens, model, and `memory_config`. `apply_memory` trims to the window and an approximate token budget. `summarize: true` inserts an extractive system note. `load_messages` reloads Postgres rows. Provider `auto` uses Azure when a key and endpoint exist, else OpenAI, else `fake_provider.stream_reply`. Live streams retry before the first token (`_astream_with_retry`).
+
+`policy_from_config` treats an empty `enabled_tools` list as no tools. `allow_all: true` is the opt-in. `_execute_tool` checks the policy again, applies `TOOL_TIMEOUT_S` or the tool's `timeout_s`, and inserts `ToolAuditLog`. `GetWeatherTool` calls Open-Meteo. `CalculatorTool` uses `safe_eval`.
+
+On session destroy, a saved agent id gets a `CallLog` and `Agent.total_calls` increments. `get_analytics` and `GET /api/v1/analytics/overview` compute p50/p95 with `percentile` over `turn_latencies`. The calls page reads `GET /api/v1/calls`. Coaching, evaluations, knowledge, marketplace, and workflows render `ComingSoon`.
+
+Updates and publish always append `AgentVersion`. Rollback still copies a snapshot forward. Duplicate and marketplace clone set `slug`. `created_by` is set when the token subject is a UUID. Passwords are bcrypt. JWTs are PyJWT.
+
+## Engineering decisions
+
+- Overlap TTS with the token stream instead of adding another product surface. The old await made time-to-first-audio include a full sentence of synthesis and stopped the model.
+- Keep browser STT as the fallback when Deepgram has no key, and still request Deepgram first so a key turns the path on without a UI change.
+- Make "no tools" the default meaning of an empty list. The previous meaning (empty means all) could not be expressed as a restriction.
+- Store stage timings on the message that already existed, and aggregate them in the analytics query, instead of adding a metrics vendor. Prometheus and OpenTelemetry are still unused dependencies.
+- Hide screens that only had sample arrays. The calls and analytics pages are the ones with rows the pipeline writes.
+
+## Debugging stories
+
+- **TTS blocked the token loop.** `synthesize_stream` collected every MP3 chunk and yielded once, and the pipeline awaited that before reading more tokens. First audio could not start until the sentence was fully synthesized, and the next tokens waited too. The queue and the per-chunk yield are the fix. `scripts/bench_latency.py` compares a sleep-based sequential full-buffer simulation with this pipeline. Its output is labeled synthetic.
+- **`BaseHTTPMiddleware` broke the WebSocket upgrade.** `backend/app/core/middleware.py` stays raw ASGI and returns early when `scope["type"]` is not `http`. HTTP gets `x-request-id` and `x-response-time-ms`. Voice turns get `latency_report`.
+- **TLS verification was disabled for a corporate proxy.** Commit `9e1cbac` turned verification off in Edge TTS and Deepgram and named the proxy vendor. The working tree only does that when `INSECURE_SKIP_TLS_VERIFY=true`.
+
+## Security scan
+
+The scan notes below are unchanged: no cloud API keys in git history. The local database password and JWT default were removed on this branch and remain inside `9e1cbac`.
 
 ## Voice pipeline
 

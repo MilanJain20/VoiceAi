@@ -24,6 +24,8 @@ os.environ.setdefault(
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-not-for-production-use")
 os.environ.setdefault("AUTH_ENABLED", "false")
 os.environ.setdefault("INSECURE_SKIP_TLS_VERIFY", "false")
+os.environ.setdefault("LLM_PROVIDER", "fake")
+os.environ.setdefault("TTS_PROVIDER", "fake")
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402

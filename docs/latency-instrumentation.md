@@ -1,6 +1,8 @@
-# Latency instrumentation plan
+# Latency instrumentation
 
-No stage timings in this document are measurements. The code computes a few durations and ships them on the socket. Nothing in the repo records a benchmark.
+The three clocks are recorded on each turn in `AudioPipeline._run_llm_tts_pipeline` and stored on `messages.latency_breakdown`. `scripts/bench_latency.py` prints synthetic p50 numbers from fake providers. Do not quote those as Azure, Deepgram, or Edge TTS latency.
+
+`stt_ms` is the client's `client_stt_ms` on a browser transcript, or the time from the last Deepgram audio byte to the final transcript. It is no longer hardcoded to 0. `llm_first_token_ms` starts when `generate_response` is entered. `tts_first_byte_ms` is the first framed audio send, measured from the start of the turn.
 
 ## What is already timed
 
