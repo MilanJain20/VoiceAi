@@ -1,0 +1,101 @@
+# ============================================================
+# Voice AI Platform — Docker Compose (Local Development)
+# ============================================================
+#
+# Usage:
+#   docker compose up -d          — start all services
+#   docker compose up -d postgres redis  — infrastructure only
+#   docker compose logs -f backend  — tail backend logs
+#
+# Architecture:
+#   postgres (5432) — primary datastore + pgvector
+#   redis (6379)    — session state, pub/sub, cache
+#   backend (8000)  — FastAPI + WebSocket server
+#   frontend (3000) — Next.js UI
+#
+# For local dev without Docker, start postgres + redis here,
+# then run backend and frontend natively for fast reload.
+# ============================================================
+
+services:
+  # ---- PostgreSQL with pgvector ----
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: voiceai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456789
+      POSTGRES_DB: Voice_AI
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d Voice_AI"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---- Redis ----
+  redis:
+    image: redis:7-alpine
+    container_name: voiceai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  # ---- Backend (FastAPI) ----
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: voiceai-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override for Docker networking
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      DATABASE_URL: postgresql+asyncpg://postgres:123456789@postgres:5432/Voice_AI
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---- Frontend (Next.js) ----
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: voiceai-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local

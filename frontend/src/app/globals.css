@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+/*
+ * Voice AI Platform — Global Styles
+ * Dark-mode-first, enterprise SaaS design system
+ */
+
+:root {
+  /* Brand colors */
+  --color-primary: #6366f1;
+  --color-primary-hover: #818cf8;
+  --color-primary-muted: #4f46e5;
+
+  /* Surfaces */
+  --color-bg: #0a0a0f;
+  --color-surface: #111118;
+  --color-surface-hover: #1a1a24;
+  --color-surface-elevated: #1e1e2a;
+  --color-border: #2a2a3a;
+  --color-border-hover: #3a3a4a;
+
+  /* Text */
+  --color-text: #e4e4e7;
+  --color-text-muted: #a1a1aa;
+  --color-text-dim: #71717a;
+
+  /* Status */
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  --color-info: #3b82f6;
+
+  /* Audio visualization */
+  --color-waveform: #6366f1;
+  --color-waveform-active: #818cf8;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-hover);
+}
+
+/* Focus styles */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* ─── Realistic Human Avatar Animations ─── */
+
+@keyframes human-breathe {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.5px); }
+}
+
+@keyframes human-speak-head {
+  0%, 100% { transform: rotate(0deg) translateY(0); }
+  15% { transform: rotate(-1.2deg) translateY(-0.5px); }
+  35% { transform: rotate(0.5deg) translateY(0px); }
+  55% { transform: rotate(-0.6deg) translateY(-0.8px); }
+  75% { transform: rotate(0.8deg) translateY(-0.3px); }
+}
+
+.animate-human-breathe {
+  animation: human-breathe 4s ease-in-out infinite;
+}
+
+.animate-speak-head {
+  animation: human-speak-head 2.5s ease-in-out infinite;
+  transform-origin: 150px 190px;
+}
