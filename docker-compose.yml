@@ -24,16 +24,16 @@ services:
     container_name: voiceai-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: 123456789
-      POSTGRES_DB: Voice_AI
+      POSTGRES_USER: ${POSTGRES_USER:-voiceai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voiceai_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-voiceai}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d Voice_AI"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-voiceai} -d ${POSTGRES_DB:-voiceai}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -68,8 +68,11 @@ services:
     environment:
       # Override for Docker networking
       POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-voiceai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voiceai_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-voiceai}
       REDIS_HOST: redis
-      DATABASE_URL: postgresql+asyncpg://postgres:123456789@postgres:5432/Voice_AI
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-voiceai}:${POSTGRES_PASSWORD:-voiceai_dev_password}@postgres:5432/${POSTGRES_DB:-voiceai}
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ./backend:/app

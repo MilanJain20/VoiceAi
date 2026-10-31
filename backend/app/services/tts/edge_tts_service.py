@@ -26,15 +26,24 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# ── Fix SSL for corporate proxies ────────────────────────────────────
-# Corporate proxies (e.g., Siemens, ZScaler) do SSL interception,
-# causing edge-tts to fail with CERTIFICATE_VERIFY_FAILED.
-# We patch the module-level SSL context to skip verification.
-_ssl_ctx = ssl.create_default_context()
-_ssl_ctx.check_hostname = False
-_ssl_ctx.verify_mode = ssl.CERT_NONE
-_edge_comm._SSL_CTX = _ssl_ctx
-logger.info("edge_tts_ssl_patched", msg="SSL verification disabled for corporate proxy")
+
+def _maybe_disable_tls_verify() -> None:
+    """Skip certificate checks only when explicitly opted in.
+
+    Some intercepting proxies present their own certificate and cause
+    edge-tts to fail with CERTIFICATE_VERIFY_FAILED. Leave this off
+    unless INSECURE_SKIP_TLS_VERIFY=true.
+    """
+    if not get_settings().insecure_skip_tls_verify:
+        return
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    _edge_comm._SSL_CTX = ssl_ctx
+    logger.warning("edge_tts_tls_verification_disabled")
+
+
+_maybe_disable_tls_verify()
 
 
 class EdgeTTSService:

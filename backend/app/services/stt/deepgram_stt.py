@@ -39,7 +39,8 @@ logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Custom async transport that disables SSL verification (ZScaler proxy bypass)
+# Optional transport that skips TLS verification.
+# Used only when INSECURE_SKIP_TLS_VERIFY=true (intercepting proxies).
 # ---------------------------------------------------------------------------
 _no_verify_ssl_ctx = ssl.create_default_context()
 _no_verify_ssl_ctx.check_hostname = False
@@ -52,8 +53,7 @@ class _NoVerifySSLTransport:
     Satisfies deepgram.transport_interface.AsyncTransport protocol:
       async send(data), async recv(), __aiter__(), async close()
 
-    Required for corporate proxies (e.g. ZScaler) that intercept TLS and
-    present their own certificate, which causes validation failures.
+    Only constructed when insecure_skip_tls_verify is enabled.
     """
 
     def __init__(self, url: str, headers: dict):
@@ -182,10 +182,11 @@ class DeepgramSTTSession:
     async def _run(self, settings: Any) -> None:
         """Background task: maintain WebSocket connection, send audio, receive transcripts."""
         try:
-            client = AsyncDeepgramClient(
-                api_key=settings.deepgram_api_key,
-                transport_factory=_no_verify_ssl_transport,
-            )
+            client_kwargs: dict[str, Any] = {"api_key": settings.deepgram_api_key}
+            if settings.insecure_skip_tls_verify:
+                logger.warning("deepgram_tls_verification_disabled", session_id=self.session_id)
+                client_kwargs["transport_factory"] = _no_verify_ssl_transport
+            client = AsyncDeepgramClient(**client_kwargs)
 
             async with client.listen.v1.connect(
                 model=settings.deepgram_model,
