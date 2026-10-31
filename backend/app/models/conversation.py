@@ -19,7 +19,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -84,6 +83,9 @@ class Message(Base, UUIDMixin, TimestampMixin):
 
     # Tool call metadata
     tool_calls: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # Per-turn stage timings: stt_ms, llm_first_token_ms, tts_first_byte_ms, total_ms
+    latency_breakdown: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # Ordering
     sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

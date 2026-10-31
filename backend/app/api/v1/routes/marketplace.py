@@ -13,42 +13,43 @@ Endpoints:
 
 from __future__ import annotations
 
+import re
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
-from app.models.marketplace import MarketplaceAgent, MarketplaceRating
 from app.models.agent import Agent
+from app.models.marketplace import MarketplaceAgent, MarketplaceRating
 
 router = APIRouter(prefix="/marketplace")
 
 
 # ── Schemas ───────────────────────────────────────────────────────
 
-from pydantic import BaseModel, Field
-from typing import Optional, List
+
+from pydantic import BaseModel, Field  # noqa: E402
 
 
 class PublishRequest(BaseModel):
     agent_id: str
     title: str = Field(..., min_length=1, max_length=200)
-    tagline: Optional[str] = None
-    description: Optional[str] = None
-    icon: Optional[str] = None
-    category: Optional[str] = "general"
-    tags: List[str] = []
+    tagline: str | None = None
+    description: str | None = None
+    icon: str | None = None
+    category: str | None = "general"
+    tags: list[str] = []
 
 
 class RateRequest(BaseModel):
     rating: int = Field(..., ge=1, le=5)
-    review: Optional[str] = None
+    review: str | None = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
+
 
 @router.post("")
 async def publish_to_marketplace(data: PublishRequest, db: AsyncSession = Depends(get_db_session)):
@@ -62,7 +63,7 @@ async def publish_to_marketplace(data: PublishRequest, db: AsyncSession = Depend
     marketplace_agent = MarketplaceAgent(
         id=uuid.uuid4(),
         agent_id=agent.id,
-        publisher_id=agent.user_id,
+        publisher_id=agent.created_by,
         title=data.title,
         tagline=data.tagline,
         description=data.description or agent.description,
@@ -84,8 +85,8 @@ async def publish_to_marketplace(data: PublishRequest, db: AsyncSession = Depend
 
 @router.get("")
 async def browse_marketplace(
-    category: Optional[str] = None,
-    search: Optional[str] = None,
+    category: str | None = None,
+    search: str | None = None,
     sort: str = "downloads",
     limit: int = 20,
     offset: int = 0,
@@ -150,7 +151,9 @@ async def featured_agents(db: AsyncSession = Depends(get_db_session)):
 @router.get("/{marketplace_id}")
 async def get_marketplace_agent(marketplace_id: str, db: AsyncSession = Depends(get_db_session)):
     """Get marketplace agent detail."""
-    result = await db.execute(select(MarketplaceAgent).where(MarketplaceAgent.id == uuid.UUID(marketplace_id)))
+    result = await db.execute(
+        select(MarketplaceAgent).where(MarketplaceAgent.id == uuid.UUID(marketplace_id))
+    )
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Marketplace agent not found")
@@ -174,21 +177,31 @@ async def get_marketplace_agent(marketplace_id: str, db: AsyncSession = Depends(
 @router.post("/{marketplace_id}/clone")
 async def clone_marketplace_agent(marketplace_id: str, db: AsyncSession = Depends(get_db_session)):
     """Clone a marketplace agent to user's workspace."""
-    result = await db.execute(select(MarketplaceAgent).where(MarketplaceAgent.id == uuid.UUID(marketplace_id)))
+    result = await db.execute(
+        select(MarketplaceAgent).where(MarketplaceAgent.id == uuid.UUID(marketplace_id))
+    )
     mp_agent = result.scalar_one_or_none()
     if not mp_agent:
         raise HTTPException(status_code=404, detail="Marketplace agent not found")
 
     # Create a new agent from the config snapshot
     config = mp_agent.config_snapshot or {}
+    base_name = f"{mp_agent.title} (cloned)"
+    slug = re.sub(r"[^\w\s-]", "", base_name.lower()).strip()
+    slug = re.sub(r"[\s_]+", "-", slug)[:120] or f"clone-{uuid.uuid4().hex[:6]}"
+    existing = await db.execute(select(Agent).where(Agent.slug == slug))
+    if existing.scalar_one_or_none():
+        slug = f"{slug}-{uuid.uuid4().hex[:6]}"
     new_agent = Agent(
         id=uuid.uuid4(),
-        name=f"{mp_agent.title} (cloned)",
-        description=mp_agent.description,
+        name=base_name,
+        slug=slug,
+        description=mp_agent.description or "",
         system_prompt=config.get("system_prompt", ""),
         welcome_message=config.get("welcome_message", "Hello!"),
         tts_voice=config.get("tts_voice", "en-US-JennyNeural"),
-        tools_config=config.get("tools", {}),
+        tools_config=config.get("tools") if isinstance(config.get("tools"), dict) else {},
+        current_version=1,
     )
     db.add(new_agent)
     mp_agent.downloads += 1
@@ -197,9 +210,13 @@ async def clone_marketplace_agent(marketplace_id: str, db: AsyncSession = Depend
 
 
 @router.post("/{marketplace_id}/rate")
-async def rate_marketplace_agent(marketplace_id: str, data: RateRequest, db: AsyncSession = Depends(get_db_session)):
+async def rate_marketplace_agent(
+    marketplace_id: str, data: RateRequest, db: AsyncSession = Depends(get_db_session)
+):
     """Rate a marketplace agent."""
-    result = await db.execute(select(MarketplaceAgent).where(MarketplaceAgent.id == uuid.UUID(marketplace_id)))
+    result = await db.execute(
+        select(MarketplaceAgent).where(MarketplaceAgent.id == uuid.UUID(marketplace_id))
+    )
     mp_agent = result.scalar_one_or_none()
     if not mp_agent:
         raise HTTPException(status_code=404, detail="Marketplace agent not found")
@@ -215,14 +232,18 @@ async def rate_marketplace_agent(marketplace_id: str, data: RateRequest, db: Asy
     # Update average
     mp_agent.total_ratings += 1
     mp_agent.avg_rating = round(
-        ((mp_agent.avg_rating or 0) * (mp_agent.total_ratings - 1) + data.rating) / mp_agent.total_ratings, 2
+        ((mp_agent.avg_rating or 0) * (mp_agent.total_ratings - 1) + data.rating)
+        / mp_agent.total_ratings,
+        2,
     )
     await db.commit()
     return {"rating_id": str(rating.id), "new_avg": mp_agent.avg_rating}
 
 
 @router.get("/{marketplace_id}/ratings")
-async def list_ratings(marketplace_id: str, limit: int = 20, db: AsyncSession = Depends(get_db_session)):
+async def list_ratings(
+    marketplace_id: str, limit: int = 20, db: AsyncSession = Depends(get_db_session)
+):
     """List ratings for a marketplace agent."""
     query = (
         select(MarketplaceRating)

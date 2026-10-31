@@ -2,7 +2,19 @@
 
 from fastapi import APIRouter
 
-from app.api.v1.routes import agents, auth, conversations, health, tools, workflows, knowledge, marketplace, evaluations
+from app.api.v1.routes import (
+    agents,
+    analytics,
+    auth,
+    calls,
+    conversations,
+    evaluations,
+    health,
+    knowledge,
+    marketplace,
+    tools,
+    workflows,
+)
 from app.api.v1.websockets import voice
 
 router = APIRouter(prefix="/api/v1")
@@ -12,6 +24,8 @@ router.include_router(health.router, tags=["health"])
 router.include_router(auth.router, tags=["auth"])
 router.include_router(conversations.router, tags=["conversations"])
 router.include_router(agents.router, tags=["agents"])
+router.include_router(calls.router, tags=["calls"])
+router.include_router(analytics.router, tags=["analytics"])
 router.include_router(tools.router, tags=["tools"])
 router.include_router(workflows.router, tags=["workflows"])
 router.include_router(knowledge.router, tags=["knowledge"])

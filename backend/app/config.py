@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     backend_workers: int = 1
-    backend_cors_origins: list[str] = Field(default=["http://localhost:3000"])
+    backend_cors_origins: list[str] = Field(
+        default=["http://localhost:3000", "http://127.0.0.1:3000"]
+    )
 
     # ---- PostgreSQL ----
     # No password default. Set POSTGRES_PASSWORD or DATABASE_URL (see .env.example).
@@ -60,6 +62,19 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_db: int = 0
     redis_url: str = "redis://localhost:6379/0"
+
+    # ---- LLM provider ----
+    # auto: Azure if a key and endpoint are set, else OpenAI if a key is set, else fake.
+    llm_provider: Literal["auto", "azure", "openai", "fake"] = "auto"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o"
+    llm_timeout_s: float = 20.0
+    llm_max_retries: int = 3
+    tts_timeout_s: float = 15.0
+    tts_max_retries: int = 2
+    tool_timeout_s: float = 8.0
+    # auto uses Edge TTS (no key). fake yields short WAV clips for offline runs.
+    tts_provider: Literal["auto", "edge", "fake"] = "auto"
 
     # ---- Azure OpenAI ----
     azure_openai_api_key: str = ""
@@ -133,6 +148,22 @@ class Settings(BaseSettings):
                 "Tokens will not survive a process restart."
             )
         return self
+
+    @property
+    def resolved_llm_provider(self) -> str:
+        if self.llm_provider != "auto":
+            return self.llm_provider
+        if self.azure_openai_api_key and self.azure_openai_endpoint:
+            return "azure"
+        if self.openai_api_key:
+            return "openai"
+        return "fake"
+
+    @property
+    def resolved_tts_provider(self) -> str:
+        if self.tts_provider == "auto":
+            return "edge"
+        return self.tts_provider
 
     @property
     def is_development(self) -> bool:

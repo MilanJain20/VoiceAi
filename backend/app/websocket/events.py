@@ -76,9 +76,7 @@ def ai_response_end(session_id: str, full_text: str, token_count: int = 0) -> WS
     )
 
 
-def error_message(
-    session_id: str, code: str, message: str, recoverable: bool = True
-) -> WSMessage:
+def error_message(session_id: str, code: str, message: str, recoverable: bool = True) -> WSMessage:
     return WSMessage(
         type=WSMessageType.ERROR,
         session_id=session_id,
@@ -94,11 +92,27 @@ def pong(session_id: str) -> WSMessage:
     )
 
 
-def vad_event(session_id: str, speech_detected: bool) -> WSMessage:
+def vad_event(session_id: str, speech_detected: bool, barge_in: bool = False) -> WSMessage:
     return WSMessage(
         type=WSMessageType.VAD_EVENT,
         session_id=session_id,
-        data={"speech_detected": speech_detected},
+        data={"speech_detected": speech_detected, "barge_in": barge_in},
+    )
+
+
+def audio_sentence_start(session_id: str, seq: int, codec: str, text: str) -> WSMessage:
+    return WSMessage(
+        type=WSMessageType.AUDIO_SENTENCE_START,
+        session_id=session_id,
+        data={"seq": seq, "codec": codec, "text": text},
+    )
+
+
+def audio_sentence_end(session_id: str, seq: int) -> WSMessage:
+    return WSMessage(
+        type=WSMessageType.AUDIO_SENTENCE_END,
+        session_id=session_id,
+        data={"seq": seq},
     )
 
 
@@ -109,6 +123,7 @@ def latency_report(
     llm_total_ms: float = 0,
     tts_first_byte_ms: float = 0,
     total_pipeline_ms: float = 0,
+    turn_id: str = "",
 ) -> WSMessage:
     return WSMessage(
         type=WSMessageType.LATENCY_REPORT,
@@ -119,6 +134,7 @@ def latency_report(
             "llm_total_ms": llm_total_ms,
             "tts_first_byte_ms": tts_first_byte_ms,
             "total_pipeline_ms": total_pipeline_ms,
+            "turn_id": turn_id,
         },
     )
 

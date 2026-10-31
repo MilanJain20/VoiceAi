@@ -12,16 +12,16 @@ Features:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import ssl
-import struct
-import asyncio
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 import edge_tts
 import edge_tts.communicate as _edge_comm
 
 from app.config import get_settings
+from app.core.exceptions import TTSError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -85,28 +85,39 @@ class EdgeTTSService:
         if not text or not text.strip():
             return
 
-        try:
-            communicate = edge_tts.Communicate(
-                text=text.strip(),
-                voice=voice or self.voice,
-                rate=rate or self.rate,
-                volume=volume or self.volume,
-                pitch=pitch or self.pitch,
-            )
-
-            # Collect full MP3 for this sentence
-            buffer = io.BytesIO()
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    buffer.write(chunk["data"])
-
-            data = buffer.getvalue()
-            if data:
-                # Yield in one piece (complete, valid MP3)
-                yield data
-
-        except Exception as e:
-            logger.error("tts_synthesis_error", error=str(e), text=text[:50])
+        settings = get_settings()
+        attempts = max(1, settings.tts_max_retries)
+        delay = 0.2
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            yielded = False
+            try:
+                communicate = edge_tts.Communicate(
+                    text=text.strip(),
+                    voice=voice or self.voice,
+                    rate=rate or self.rate,
+                    volume=volume or self.volume,
+                    pitch=pitch or self.pitch,
+                )
+                async with asyncio.timeout(settings.tts_timeout_s):
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio" and chunk["data"]:
+                            yielded = True
+                            yield chunk["data"]
+                if not yielded:
+                    raise TTSError("Edge TTS returned no audio")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if yielded or attempt >= attempts - 1:
+                    logger.error("tts_synthesis_error", error=str(exc), text=text[:50])
+                    raise TTSError(str(exc)) from exc
+                logger.warning("tts_retry", attempt=attempt + 1, error=str(exc))
+                await asyncio.sleep(delay)
+                delay *= 2
+        raise TTSError(str(last_error))
 
     async def synthesize_full(self, text: str) -> bytes | None:
         """Synthesize full text and return complete MP3 bytes."""

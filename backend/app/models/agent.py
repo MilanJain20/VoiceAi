@@ -26,7 +26,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -64,11 +63,13 @@ class Agent(Base, UUIDMixin, TimestampMixin):
     avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     category: Mapped[AgentCategory] = mapped_column(
         Enum(AgentCategory, values_callable=lambda e: [x.value for x in e]),
-        default=AgentCategory.GENERAL, nullable=False,
+        default=AgentCategory.GENERAL,
+        nullable=False,
     )
     status: Mapped[AgentStatus] = mapped_column(
         Enum(AgentStatus, values_callable=lambda e: [x.value for x in e]),
-        default=AgentStatus.DRAFT, nullable=False,
+        default=AgentStatus.DRAFT,
+        nullable=False,
     )
 
     # ── Prompt ──
@@ -116,9 +117,12 @@ class Agent(Base, UUIDMixin, TimestampMixin):
     current_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     # ── Relationships ──
-    versions: Mapped[list["AgentVersion"]] = relationship(
-        "AgentVersion", back_populates="agent", cascade="all, delete-orphan",
-        lazy="selectin", order_by="AgentVersion.version.desc()"
+    versions: Mapped[list[AgentVersion]] = relationship(
+        "AgentVersion",
+        back_populates="agent",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="AgentVersion.version.desc()",
     )
 
     is_template: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -168,6 +172,7 @@ class CallLog(Base, UUIDMixin, TimestampMixin):
     # Latency
     avg_latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     p95_latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    turn_latencies: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     # Outcome
     status: Mapped[str] = mapped_column(String(32), default="completed", nullable=False)

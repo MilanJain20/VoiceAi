@@ -66,7 +66,8 @@ DEFAULT_AGENTS: dict[str, AgentConfig] = {
         ),
         tts_voice="en-US-AriaNeural",
         temperature=0.5,
-        tools=[],  # empty = all available tools
+        tools=[],
+        metadata={"allow_all_tools": True},
     ),
     "concise": AgentConfig(
         agent_id="concise",

@@ -6,8 +6,8 @@ Manages connection pools, background tasks, and graceful cleanup.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from fastapi import FastAPI
 
@@ -53,19 +53,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Wire conversation service into the audio pipeline
     from app.services.audio.pipeline import audio_pipeline
+
     audio_pipeline.set_conversation_service(conversation_service)
     audio_pipeline.set_db_manager(db_manager)
+    audio_pipeline.set_redis(redis_manager)
 
     # Register built-in tools
     from app.services.tools.builtin import register_builtin_tools
+
     register_builtin_tools()
     from app.services.tools import tool_registry
+
     logger.info("tools_registered", count=tool_registry.count, tools=tool_registry.list_names())
 
     # Initialize Redis broadcaster for cross-instance WebSocket delivery
     if redis_manager.is_redis:
         from app.websocket.broadcaster import create_broadcaster
         from app.websocket.manager import connection_manager
+
         broadcaster = create_broadcaster(redis_manager)
         connection_manager.set_broadcaster(broadcaster)
         await broadcaster.start()
@@ -86,6 +91,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Stop Redis broadcaster
     from app.websocket.broadcaster import get_broadcaster
+
     bc = get_broadcaster()
     if bc:
         await bc.stop()
