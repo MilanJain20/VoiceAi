@@ -8,7 +8,7 @@
 
 import { create } from "zustand";
 import { WebSocketClient } from "@/lib/websocket-client";
-import { audioPlayer } from "@/lib/audio-player";
+import { audioPlayer, parseAudioFrame } from "@/lib/audio-player";
 import { getWsUrl } from "@/lib/utils";
 import type {
   ConnectionState,
@@ -24,6 +24,7 @@ interface VoiceStore {
   voiceState: VoiceState;
   sessionId: string | null;
   agentId: string | null;
+  sttMode: string;
   transcript: TranscriptEntry[];
   latency: LatencyMetrics | null;
   amplitude: number;
@@ -71,6 +72,7 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
   voiceState: "idle",
   sessionId: null,
   agentId: null,
+  sttMode: "browser",
   transcript: [],
   latency: null,
   amplitude: 0,
@@ -103,7 +105,7 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
           get()._wsClient?.sendJSON({
             type: "start_session",
             session_id: get().sessionId || "",
-            data: { stt_mode: "browser", agent_id: get().agentId || "default" },
+            data: { stt_mode: "deepgram", agent_id: get().agentId || "default" },
           });
         }
       },
@@ -147,7 +149,7 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
       _wsClient.sendJSON({
         type: "start_session",
         session_id: get().sessionId || "",
-        data: { stt_mode: "browser", agent_id: get().agentId || "default" },
+        data: { stt_mode: "deepgram", agent_id: get().agentId || "default" },
       });
     }
   },
@@ -186,8 +188,12 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
   },
 
   sendUserTranscript: (text: string) => {
-    const { _wsClient, connectionState } = get();
-    if (connectionState !== "connected" || !text.trim()) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    const deliver = () => {
+      const { _wsClient, connectionState } = get();
+      if (connectionState !== "connected" || !_wsClient?.isConnected) return false;
 
     // Immediately show user message and switch to processing
     set((state) => {
@@ -210,11 +216,22 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
       };
     });
 
-    _wsClient?.sendJSON({
-      type: "user_transcript",
-      session_id: get().sessionId || "",
-      data: { text: text.trim() },
-    });
+      _wsClient.sendJSON({
+        type: "user_transcript",
+        session_id: get().sessionId || "",
+        data: { text: trimmed },
+      });
+      return true;
+    };
+
+    if (deliver()) return;
+    if (get().connectionState !== "connected") get().connect();
+    if (get().voiceState === "idle") get().startListening();
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      if (deliver() || tries > 30) clearInterval(timer);
+    }, 100);
   },
 
   setAmplitude: (amplitude: number) => {
@@ -223,8 +240,31 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
 
   _handleMessage: (message: WSMessage) => {
     switch (message.type) {
-      case "session_started":
-        set({ sessionId: message.session_id });
+      case "session_started": {
+        const config = (message.data.config || {}) as { stt_mode?: string };
+        set({
+          sessionId: message.session_id,
+          sttMode: config.stt_mode || get().sttMode,
+        });
+        break;
+      }
+
+      case "vad_event":
+        if (message.data.barge_in) {
+          audioPlayer.stop();
+          set({ voiceState: "listening" });
+        }
+        break;
+
+      case "audio_sentence_start":
+        audioPlayer.beginSentence(
+          Number(message.data.seq || 0),
+          (message.data.codec as "wav" | "mp3") || "mp3",
+        );
+        break;
+
+      case "audio_sentence_end":
+        audioPlayer.endSentence(Number(message.data.seq || 0));
         break;
 
       case "session_ended":
@@ -347,9 +387,12 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
   },
 
   _handleBinary: (data: ArrayBuffer) => {
-    // TTS audio from server — enqueue for playback
-    if (data.byteLength > 0) {
-      audioPlayer.enqueue(data);
+    if (data.byteLength === 0) return;
+    const frame = parseAudioFrame(data);
+    if (frame) {
+      audioPlayer.pushFrame(frame);
+      return;
     }
+    audioPlayer.enqueue(data);
   },
 }; });
