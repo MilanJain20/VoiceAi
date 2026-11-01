@@ -11,11 +11,12 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from fastapi import Depends, HTTPException, Request, status
+import bcrypt
+import jwt as pyjwt
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import get_settings
@@ -25,43 +26,18 @@ logger = get_logger(__name__)
 
 # ── Password Hashing ─────────────────────────────────────────────────
 
-try:
-    import bcrypt as _bcrypt
-    _BCRYPT_AVAILABLE = True
-except ImportError:
-    _bcrypt = None
-    _BCRYPT_AVAILABLE = False
-
 
 def hash_password(password: str) -> str:
     """Hash a plaintext password using bcrypt."""
-    if not _BCRYPT_AVAILABLE:
-        import hashlib
-        return hashlib.sha256(password.encode()).hexdigest()
-    return _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")  # type: ignore[union-attr]
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plaintext password against a hash."""
-    if not _BCRYPT_AVAILABLE:
-        import hashlib
-        return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
-    return _bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))  # type: ignore[union-attr]
+    """Verify a plaintext password against a bcrypt hash."""
+    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
 
 
 # ── JWT Tokens ────────────────────────────────────────────────────────
-
-try:
-    import jwt as pyjwt
-    _JWT_AVAILABLE = True
-except ImportError:
-    try:
-        from jose import jwt as jose_jwt
-        pyjwt = jose_jwt  # type: ignore[assignment]
-        _JWT_AVAILABLE = True
-    except ImportError:
-        pyjwt = None  # type: ignore[assignment]
-        _JWT_AVAILABLE = False
 
 
 def create_access_token(
@@ -70,11 +46,8 @@ def create_access_token(
 ) -> str:
     """Create a signed JWT access token."""
     settings = get_settings()
-    if not _JWT_AVAILABLE:
-        raise RuntimeError("No JWT library installed. Install PyJWT or python-jose.")
-
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (
+    expire = datetime.now(UTC) + (
         expires_delta or timedelta(minutes=settings.jwt_access_token_expire_minutes)
     )
     to_encode.update({"exp": expire, "type": "access"})
@@ -84,11 +57,8 @@ def create_access_token(
 def create_refresh_token(data: dict[str, Any]) -> str:
     """Create a signed JWT refresh token (longer lived)."""
     settings = get_settings()
-    if not _JWT_AVAILABLE:
-        raise RuntimeError("No JWT library installed.")
-
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_token_expire_days)
+    expire = datetime.now(UTC) + timedelta(days=settings.jwt_refresh_token_expire_days)
     to_encode.update({"exp": expire, "type": "refresh"})
     return pyjwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)  # type: ignore[union-attr]
 
@@ -96,9 +66,6 @@ def create_refresh_token(data: dict[str, Any]) -> str:
 def decode_access_token(token: str) -> dict[str, Any]:
     """Decode and verify a JWT token. Raises HTTPException on failure."""
     settings = get_settings()
-    if not _JWT_AVAILABLE:
-        raise RuntimeError("No JWT library installed.")
-
     try:
         payload = pyjwt.decode(  # type: ignore[union-attr]
             token,
@@ -111,7 +78,7 @@ def decode_access_token(token: str) -> dict[str, Any]:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid token: {e}",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from e
 
 
 # ── FastAPI Auth Dependencies ─────────────────────────────────────────
@@ -122,6 +89,7 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 @dataclass
 class TokenPayload:
     """Decoded token contents."""
+
     sub: str  # user ID
     email: str = ""
     role: str = "viewer"
@@ -129,7 +97,7 @@ class TokenPayload:
 
 
 async def get_current_user_optional(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> TokenPayload | None:
     """
     Extract user from Bearer token if present.
@@ -148,7 +116,7 @@ async def get_current_user_optional(
 
 
 async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> TokenPayload:
     """
     Require a valid Bearer token. Raises 401 if missing/invalid.

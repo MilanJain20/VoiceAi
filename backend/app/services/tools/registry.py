@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.logging import get_logger
-from app.services.tools.base import BaseTool
+from app.services.tools.base import BaseTool  # noqa: TC001
 
 logger = get_logger(__name__)
 
@@ -35,7 +35,7 @@ class ToolRegistry:
         Get tools by name list.
         If names is None or empty, returns ALL tools.
         """
-        if not names:
+        if names is None:
             return list(self._tools.values())
         return [t for n in names if (t := self._tools.get(n)) is not None]
 

@@ -23,12 +23,14 @@ Message routing:
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import traceback
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.config import get_settings
 from app.core.logging import get_logger
+from app.core.security import decode_access_token
 from app.schemas.websocket import WSMessage, WSMessageType
 from app.services.audio.pipeline import audio_pipeline
 from app.websocket.connection import ConnectionState, VoiceConnection
@@ -47,6 +49,18 @@ async def voice_websocket(websocket: WebSocket) -> None:
 
     Each connection represents one voice conversation session.
     """
+    settings = get_settings()
+    if settings.auth_enabled:
+        token = websocket.query_params.get("token")
+        if not token:
+            await websocket.close(code=1008, reason="Not authenticated")
+            return
+        try:
+            decode_access_token(token)
+        except Exception:
+            await websocket.close(code=1008, reason="Invalid token")
+            return
+
     connection = VoiceConnection(websocket)
 
     try:
@@ -70,7 +84,7 @@ async def voice_websocket(websocket: WebSocket) -> None:
             error=str(e),
             traceback=traceback.format_exc(),
         )
-        try:
+        with contextlib.suppress(Exception):
             await connection.send_message(
                 error_message(
                     connection.session_id,
@@ -79,8 +93,6 @@ async def voice_websocket(websocket: WebSocket) -> None:
                     recoverable=False,
                 )
             )
-        except Exception:
-            pass
     finally:
         await audio_pipeline.destroy_session(connection.session_id)
         await connection_manager.disconnect(connection.session_id)
@@ -155,10 +167,8 @@ async def _handle_control_message(connection: VoiceConnection, message: WSMessag
                 session_id=connection.session_id,
                 config=message.data,
             )
-            await audio_pipeline.handle_session_start(connection, message.data or {})
-            await connection.send_message(
-                session_started(connection.session_id, config=message.data)
-            )
+            resolved = await audio_pipeline.handle_session_start(connection, message.data or {})
+            await connection.send_message(session_started(connection.session_id, config=resolved))
 
         case WSMessageType.END_SESSION:
             logger.info("ws_session_ending", session_id=connection.session_id)
@@ -185,13 +195,14 @@ async def _handle_control_message(connection: VoiceConnection, message: WSMessag
         case WSMessageType.USER_TRANSCRIPT:
             # Browser-side STT (Web Speech API) — text arrives directly
             text = (message.data or {}).get("text", "").strip()
+            client_stt_ms = float((message.data or {}).get("client_stt_ms") or 0)
             if text:
                 logger.info(
                     "ws_user_transcript",
                     session_id=connection.session_id,
                     text=text[:80],
                 )
-                await audio_pipeline.handle_user_transcript(connection, text)
+                await audio_pipeline.handle_user_transcript(connection, text, stt_ms=client_stt_ms)
 
         case _:
             logger.warning(

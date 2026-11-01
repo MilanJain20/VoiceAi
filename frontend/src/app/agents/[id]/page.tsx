@@ -406,9 +406,20 @@ export default function AgentDetailPage() {
           <div className="max-w-3xl space-y-5">
             <div>
               <h3 className="text-sm font-medium mb-1">Enabled Tools</h3>
-              <p className="text-xs text-[var(--color-text-dim)] mb-4">
-                Select which tools this agent can use during conversations
+              <p className="text-xs text-[var(--color-text-dim)] mb-3">
+                Empty selection allows no tools. Allow all exposes every registered tool. Weather calls Open-Meteo. The calculator walks an AST and does not use eval.
               </p>
+              <button
+                type="button"
+                onClick={() => setToolsConfig({ ...toolsConfig, allow_all: !toolsConfig.allow_all })}
+                className={`mb-4 px-3 py-1.5 rounded-lg text-xs border ${
+                  toolsConfig.allow_all
+                    ? "border-[var(--color-primary)] text-[var(--color-primary)]"
+                    : "border-[var(--color-border)] text-[var(--color-text-dim)]"
+                }`}
+              >
+                {toolsConfig.allow_all ? "Allow all tools: on" : "Allow all tools: off"}
+              </button>
 
               {[
                 { name: "get_current_time", desc: "Get the current date and time", icon: "🕐" },
@@ -433,6 +444,7 @@ export default function AgentDetailPage() {
                         const tools = toolsConfig.enabled_tools || [];
                         setToolsConfig({
                           ...toolsConfig,
+                          allow_all: false,
                           enabled_tools: enabled
                             ? tools.filter((t: string) => t !== tool.name)
                             : [...tools, tool.name],
@@ -538,7 +550,7 @@ export default function AgentDetailPage() {
                 {memoryConfig.summarize ? "✓ Auto-Summarize ON" : "Auto-Summarize OFF"}
               </button>
               <p className="text-[10px] text-[var(--color-text-dim)]">
-                Automatically summarize older messages to save context window
+                Keep an extractive note of messages that fall outside the window. This does not call a second model.
               </p>
             </div>
           </div>

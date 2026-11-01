@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: voiceai
+          POSTGRES_PASSWORD: voiceai_dev_password
+          POSTGRES_DB: voiceai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U voiceai -d voiceai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://voiceai:voiceai_dev_password@localhost:5432/voiceai
+      POSTGRES_PASSWORD: voiceai_dev_password
+      JWT_SECRET_KEY: ci-jwt-secret-not-for-production
+      LLM_PROVIDER: fake
+      TTS_PROVIDER: fake
+      AUTH_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend
+        run: pip install -e "./backend[dev]"
+      - name: Migrate
+        working-directory: backend
+        run: alembic upgrade head
+      - name: Ruff on files changed from main
+        run: |
+          git fetch origin main --depth=1 || true
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then base="origin/main"; fi
+          files=$(git diff --name-only --diff-filter=ACMRT "$base" -- '*.py' || true)
+          if [ -n "$files" ]; then
+            python -m ruff check $files
+            python -m ruff format --check $files
+          else
+            echo "No Python files changed"
+          fi
+      - name: Pytest
+        working-directory: backend
+        run: python -m pytest tests/ -q --tb=short
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install, lint, build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run build

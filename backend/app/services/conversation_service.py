@@ -11,11 +11,10 @@ Handles:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.models.conversation import (
@@ -69,6 +68,7 @@ class ConversationService:
         model: str | None = None,
         latency_ms: int | None = None,
         tool_calls: dict | None = None,
+        latency_breakdown: dict | None = None,
     ) -> Message | None:
         """Add a message to a conversation."""
         async with self._session_factory() as session:
@@ -91,6 +91,7 @@ class ConversationService:
                 model=model,
                 latency_ms=latency_ms,
                 tool_calls=tool_calls,
+                latency_breakdown=latency_breakdown,
                 sequence=conversation.message_count,
             )
             session.add(message)
@@ -104,9 +105,7 @@ class ConversationService:
             await session.refresh(message)
             return message
 
-    async def end_conversation(
-        self, session_id: str, total_duration_ms: int = 0
-    ) -> None:
+    async def end_conversation(self, session_id: str, total_duration_ms: int = 0) -> None:
         """Mark a conversation as completed."""
         async with self._session_factory() as session:
             await session.execute(
@@ -114,7 +113,7 @@ class ConversationService:
                 .where(Conversation.session_id == session_id)
                 .values(
                     status=ConversationStatus.COMPLETED,
-                    ended_at=datetime.now(timezone.utc),
+                    ended_at=datetime.now(UTC),
                     total_duration_ms=total_duration_ms,
                 )
             )
@@ -129,9 +128,7 @@ class ConversationService:
             )
             return result.scalar_one_or_none()
 
-    async def list_conversations(
-        self, limit: int = 50, offset: int = 0
-    ) -> list[Conversation]:
+    async def list_conversations(self, limit: int = 50, offset: int = 0) -> list[Conversation]:
         """List recent conversations."""
         async with self._session_factory() as session:
             result = await session.execute(
@@ -141,3 +138,15 @@ class ConversationService:
                 .offset(offset)
             )
             return list(result.scalars().all())
+
+    async def list_turns(self, session_id: str) -> list[tuple[str, str]]:
+        """Return (role, content) pairs in order, for reloading LLM memory."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Conversation).where(Conversation.session_id == session_id)
+            )
+            conversation = result.scalar_one_or_none()
+            if conversation is None:
+                return []
+            messages = sorted(conversation.messages, key=lambda row: row.sequence)
+            return [(message.role.value, message.content) for message in messages]

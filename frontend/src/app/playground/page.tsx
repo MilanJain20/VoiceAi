@@ -6,6 +6,7 @@ import { ConnectionStatus } from "@/components/connection-status";
 import { VoiceButton } from "@/components/voice-button";
 import { WebcamFeed, type WebcamFeedHandle } from "@/components/webcam-feed";
 import { AIAvatar } from "@/components/ai-avatar";
+import { useAudioCapture } from "@/hooks/use-audio-capture";
 import { useSpeechRecognition } from "@/hooks/use-speech-recognition";
 import { useFaceTracking } from "@/hooks/use-face-tracking";
 import { useVoiceStore } from "@/stores/voice-store";
@@ -33,11 +34,16 @@ function PlaygroundInner() {
     startListening,
     stopListening,
     sendUserTranscript,
+    sendInterrupt,
+    sendAudioChunk,
     setAmplitude,
     setAgentId,
+    sttMode,
   } = useVoiceStore();
 
   const [mounted, setMounted] = useState(false);
+  const [draft, setDraft] = useState("");
+  const bargeInSent = useRef(false);
   const [agentName, setAgentName] = useState<string>("Aria AI");
   const [sttError, setSttError] = useState<string | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -67,7 +73,11 @@ function PlaygroundInner() {
     stop: stopSpeechRecognition,
   } = useSpeechRecognition({
     onInterimTranscript: (text) => {
-      // Update amplitude based on text length for visual feedback
+      const stateNow = useVoiceStore.getState().voiceState;
+      if ((stateNow === "speaking" || stateNow === "processing") && !bargeInSent.current) {
+        bargeInSent.current = true;
+        sendInterrupt();
+      }
       setAmplitude(Math.min(text.length * 0.02, 1.0));
 
       // Show interim text in the transcript (as partial user message)
@@ -92,6 +102,7 @@ function PlaygroundInner() {
       });
     },
     onFinalTranscript: (text) => {
+      bargeInSent.current = false;
       if (text.trim()) {
         sendUserTranscript(text.trim());
       }
@@ -101,6 +112,20 @@ function PlaygroundInner() {
       setSttError(`Speech recognition error: ${error}`);
     },
   });
+
+  const { start: startCapture, stop: stopCapture } = useAudioCapture({
+    onAudioChunk: (chunk) => sendAudioChunk(chunk.pcm16),
+    onAmplitude: setAmplitude,
+  });
+
+  useEffect(() => {
+    if (!isActive || sttMode !== "deepgram") {
+      stopCapture();
+      return;
+    }
+    stopSpeechRecognition();
+    void startCapture();
+  }, [isActive, sttMode, startCapture, stopCapture, stopSpeechRecognition]);
 
   const handleToggle = useCallback(async () => {
     if (voiceState === "idle") {
@@ -113,10 +138,11 @@ function PlaygroundInner() {
       startListening();
     } else {
       stopSpeechRecognition();
+      stopCapture();
       stopListening();
       setAmplitude(0);
     }
-  }, [voiceState, connectionState, connect, startSpeechRecognition, startListening, stopSpeechRecognition, stopListening, setAmplitude]);
+  }, [voiceState, connectionState, connect, startSpeechRecognition, startListening, stopSpeechRecognition, stopCapture, stopListening, setAmplitude]);
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -171,7 +197,7 @@ function PlaygroundInner() {
           <ConnectionStatus state={connectionState} />
           {isActive && (
             <div className="flex gap-3 text-[10px] text-[var(--color-text-dim)] font-mono">
-              <span>STT Browser</span>
+              <span>STT {sttMode}</span>
               <span>LLM {latency?.llm_first_token_ms ?? "—"}ms</span>
               <span>E2E {latency?.total_pipeline_ms ?? "—"}ms</span>
             </div>
@@ -206,6 +232,18 @@ function PlaygroundInner() {
           {/* Controls Bar */}
           <div className="flex items-center justify-center gap-4 py-3">
             <VoiceButton onToggle={handleToggle} />
+            {(voiceState === "speaking" || voiceState === "processing") && (
+              <button
+                type="button"
+                onClick={() => {
+                  bargeInSent.current = true;
+                  sendInterrupt();
+                }}
+                className="px-3 py-2 text-xs rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)]"
+              >
+                Interrupt
+              </button>
+            )}
 
             {!isSpeechSupported && (
               <p className="text-xs text-amber-400 max-w-[200px]">
@@ -269,6 +307,29 @@ function PlaygroundInner() {
           </div>
 
           {/* Chat Footer — status */}
+          <form
+            className="px-3 py-2 border-t border-[var(--color-border)] flex gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const text = draft.trim();
+              if (!text) return;
+              if (connectionState !== "connected") connect();
+              if (voiceState === "idle") startListening();
+              if (voiceState === "speaking" || voiceState === "processing") sendInterrupt();
+              sendUserTranscript(text);
+              setDraft("");
+            }}
+          >
+            <input
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder="Type a message"
+              className="flex-1 bg-transparent text-xs outline-none"
+            />
+            <button type="submit" className="text-xs text-[var(--color-primary)]">
+              Send
+            </button>
+          </form>
           <div className="px-4 py-2 border-t border-[var(--color-border)] text-[10px] text-[var(--color-text-dim)] flex items-center gap-2">
             {voiceState === "listening" && (
               <>

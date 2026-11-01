@@ -10,12 +10,13 @@ Provides sample tools that demonstrate the function-calling framework:
 from __future__ import annotations
 
 import datetime
-import math
-import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
+
 from app.services.tools.base import BaseTool, ToolResult
+from app.services.tools.safe_eval import UnsafeExpressionError, safe_eval
 
 
 class GetCurrentTimeTool(BaseTool):
@@ -55,14 +56,14 @@ class GetCurrentTimeTool(BaseTool):
 
 
 class GetWeatherTool(BaseTool):
-    """Returns mock weather data for a given city."""
+    """Current weather from Open-Meteo. No API key. Fails closed on timeout."""
 
     name = "get_weather"
     description = (
-        "Get the current weather for a city. Returns temperature, "
-        "conditions, humidity, and wind speed. This is simulated data "
-        "for demonstration purposes."
+        "Get the current weather for a city from Open-Meteo. "
+        "Returns temperature, a weather code, and wind speed."
     )
+    timeout_s = 8.0
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -79,57 +80,64 @@ class GetWeatherTool(BaseTool):
         "required": ["city"],
     }
 
-    # Mock weather data keyed by normalized city name
-    _MOCK_DATA: dict[str, dict[str, Any]] = {
-        "san francisco": {"temp_c": 16, "condition": "Foggy", "humidity": 78, "wind_kmh": 22},
-        "new york": {"temp_c": 22, "condition": "Partly Cloudy", "humidity": 55, "wind_kmh": 15},
-        "london": {"temp_c": 14, "condition": "Rainy", "humidity": 85, "wind_kmh": 18},
-        "tokyo": {"temp_c": 28, "condition": "Sunny", "humidity": 65, "wind_kmh": 10},
-        "paris": {"temp_c": 19, "condition": "Clear", "humidity": 50, "wind_kmh": 12},
-        "sydney": {"temp_c": 21, "condition": "Sunny", "humidity": 60, "wind_kmh": 20},
-        "berlin": {"temp_c": 17, "condition": "Overcast", "humidity": 70, "wind_kmh": 14},
-        "mumbai": {"temp_c": 32, "condition": "Humid", "humidity": 90, "wind_kmh": 8},
-    }
-
     async def execute(self, **kwargs: Any) -> ToolResult:
-        city = kwargs.get("city", "Unknown")
+        city = (kwargs.get("city") or "").strip()
         unit = kwargs.get("unit", "celsius")
+        if not city:
+            return ToolResult(output="A city name is required.", success=False)
+        timeout = httpx.Timeout(getattr(self, "timeout_s", 8.0))
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                geo = await client.get(
+                    "https://geocoding-api.open-meteo.com/v1/search",
+                    params={"name": city, "count": 1},
+                )
+                geo.raise_for_status()
+                results = geo.json().get("results") or []
+                if not results:
+                    return ToolResult(output=f"No location found for {city}.", success=False)
+                loc = results[0]
+                forecast = await client.get(
+                    "https://api.open-meteo.com/v1/forecast",
+                    params={
+                        "latitude": loc["latitude"],
+                        "longitude": loc["longitude"],
+                        "current": "temperature_2m,weather_code,wind_speed_10m",
+                    },
+                )
+                forecast.raise_for_status()
+                current = forecast.json().get("current") or {}
+        except httpx.TimeoutException:
+            return ToolResult(output=f"Weather lookup for {city} timed out.", success=False)
+        except httpx.HTTPError as exc:
+            return ToolResult(output=f"Weather lookup failed: {exc}", success=False)
 
-        key = city.lower().strip()
-        data = self._MOCK_DATA.get(key)
-        if not data:
-            # Generate pseudo-random but deterministic weather
-            seed = sum(ord(c) for c in key)
-            temp_c = 10 + (seed % 25)
-            conditions = ["Sunny", "Cloudy", "Rainy", "Partly Cloudy", "Clear", "Windy"]
-            data = {
-                "temp_c": temp_c,
-                "condition": conditions[seed % len(conditions)],
-                "humidity": 40 + (seed % 50),
-                "wind_kmh": 5 + (seed % 30),
-            }
-
-        temp_c = data["temp_c"]
+        temp_c = current.get("temperature_2m")
+        if temp_c is None:
+            return ToolResult(
+                output=f"Weather service returned no temperature for {city}.", success=False
+            )
         if unit == "fahrenheit":
             temp = round(temp_c * 9 / 5 + 32)
             temp_str = f"{temp}°F"
         else:
             temp = temp_c
             temp_str = f"{temp}°C"
-
+        place = loc.get("name", city)
         output = (
-            f"Weather in {city}: {data['condition']}, {temp_str}, "
-            f"humidity {data['humidity']}%, wind {data['wind_kmh']} km/h."
+            f"Weather in {place}: {temp_str}, "
+            f"weather code {current.get('weather_code')}, "
+            f"wind {current.get('wind_speed_10m')} km/h. Source: Open-Meteo."
         )
         return ToolResult(
             output=output,
             data={
-                "city": city,
+                "city": place,
                 "temperature": temp,
                 "unit": unit,
-                "condition": data["condition"],
-                "humidity": data["humidity"],
-                "wind_kmh": data["wind_kmh"],
+                "weather_code": current.get("weather_code"),
+                "wind_kmh": current.get("wind_speed_10m"),
+                "source": "open-meteo",
             },
         )
 
@@ -155,52 +163,22 @@ class CalculatorTool(BaseTool):
         "required": ["expression"],
     }
 
-    # Whitelist of allowed names in eval
-    _SAFE_NAMES: dict[str, Any] = {
-        "sqrt": math.sqrt,
-        "sin": math.sin,
-        "cos": math.cos,
-        "tan": math.tan,
-        "log": math.log,
-        "log10": math.log10,
-        "log2": math.log2,
-        "abs": abs,
-        "round": round,
-        "pow": pow,
-        "pi": math.pi,
-        "e": math.e,
-        "inf": float("inf"),
-    }
-
     async def execute(self, **kwargs: Any) -> ToolResult:
         expr = kwargs.get("expression", "")
-
-        # Sanitize: only allow math-safe characters
-        if not re.match(r'^[\d\s\+\-\*/\.\(\)\,\^a-zA-Z_]+$', expr):
-            return ToolResult(
-                output=f"Invalid expression: {expr}",
-                success=False,
-            )
-
-        # Replace ^ with ** for exponentiation
-        expr_clean = expr.replace("^", "**")
-
         try:
-            result = eval(expr_clean, {"__builtins__": {}}, self._SAFE_NAMES)
-            # Format nicely
-            if isinstance(result, float):
-                if result == int(result) and not math.isinf(result):
-                    result = int(result)
-                else:
-                    result = round(result, 6)
+            result = safe_eval(str(expr))
+            if isinstance(result, float) and result == int(result):
+                result = int(result)
+            elif isinstance(result, float):
+                result = round(result, 6)
             return ToolResult(
                 output=f"The result of {expr} is {result}.",
                 data={"expression": expr, "result": result},
             )
         except ZeroDivisionError:
             return ToolResult(output="Error: Division by zero.", success=False)
-        except Exception as e:
-            return ToolResult(output=f"Error evaluating '{expr}': {e}", success=False)
+        except UnsafeExpressionError as exc:
+            return ToolResult(output=f"Error evaluating '{expr}': {exc}", success=False)
 
 
 def register_builtin_tools() -> None:

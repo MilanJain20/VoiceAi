@@ -20,22 +20,34 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
-from app.models.agent import Agent, AgentVersion, AgentStatus, AgentCategory, CallLog
+from app.core.security import TokenPayload, get_current_user
+from app.models.agent import Agent, AgentCategory, AgentStatus, AgentVersion, CallLog
+from app.models.conversation import Conversation, Message
 from app.schemas.agent import (
-    AgentCreate,
-    AgentUpdate,
-    AgentDuplicate,
     VOICE_CATALOG,
+    AgentCreate,
+    AgentDuplicate,
+    AgentUpdate,
 )
+from app.services.metrics import percentile
 
-router = APIRouter(prefix="/agents")
+router = APIRouter(prefix="/agents", dependencies=[Depends(get_current_user)])
+
+
+def _actor_id(user: TokenPayload | None) -> uuid.UUID | None:
+    if user is None:
+        return None
+    try:
+        return uuid.UUID(user.sub)
+    except (ValueError, AttributeError):
+        return None
 
 
 def _slugify(name: str) -> str:
@@ -109,10 +121,12 @@ def _serialize_detail(agent: Agent) -> dict:
 
 # ── CRUD ─────────────────────────────────────────────────────────────
 
+
 @router.post("", status_code=201)
 async def create_agent(
     body: AgentCreate,
     db: AsyncSession = Depends(get_db_session),
+    user: TokenPayload = Depends(get_current_user),
 ) -> dict:
     """Create a new voice agent."""
     slug = _slugify(body.name)
@@ -125,7 +139,9 @@ async def create_agent(
         name=body.name,
         slug=slug,
         description=body.description,
-        category=AgentCategory(body.category) if body.category in [e.value for e in AgentCategory] else AgentCategory.GENERAL,
+        category=AgentCategory(body.category)
+        if body.category in [e.value for e in AgentCategory]
+        else AgentCategory.GENERAL,
         system_prompt=body.system_prompt,
         welcome_message=body.welcome_message,
         tts_voice=body.tts_voice,
@@ -142,6 +158,7 @@ async def create_agent(
         workflow_config=body.workflow_config,
         is_template=body.is_template,
         current_version=1,
+        created_by=_actor_id(user),
     )
     db.add(agent)
     await db.flush()
@@ -186,9 +203,7 @@ async def list_templates(
     db: AsyncSession = Depends(get_db_session),
 ) -> list[dict]:
     """List template agents (pre-built starting points)."""
-    result = await db.execute(
-        select(Agent).where(Agent.is_template == True).order_by(Agent.name)
-    )
+    result = await db.execute(select(Agent).where(Agent.is_template == True).order_by(Agent.name))
     return [_serialize_summary(a) for a in result.scalars().all()]
 
 
@@ -235,15 +250,14 @@ async def update_agent(
             new_slug = f"{new_slug}-{uuid.uuid4().hex[:6]}"
         agent.slug = new_slug
 
-    if body.change_note:
-        agent.current_version += 1
-        version = AgentVersion(
-            agent_id=agent.id,
-            version=agent.current_version,
-            change_note=body.change_note,
-            config_snapshot=_agent_to_snapshot(agent),
-        )
-        db.add(version)
+    agent.current_version += 1
+    version = AgentVersion(
+        agent_id=agent.id,
+        version=agent.current_version,
+        change_note=body.change_note or "Updated",
+        config_snapshot=_agent_to_snapshot(agent),
+    )
+    db.add(version)
 
     await db.commit()
     await db.refresh(agent)
@@ -266,6 +280,7 @@ async def duplicate_agent(
     agent_id: str,
     body: AgentDuplicate,
     db: AsyncSession = Depends(get_db_session),
+    user: TokenPayload = Depends(get_current_user),
 ) -> dict:
     """Duplicate an agent with a new name."""
     source = await _get_agent_or_404(db, agent_id)
@@ -296,6 +311,7 @@ async def duplicate_agent(
         memory_config=source.memory_config,
         workflow_config=source.workflow_config,
         current_version=1,
+        created_by=_actor_id(user),
     )
     db.add(clone)
     await db.flush()
@@ -320,12 +336,22 @@ async def publish_agent(
     """Set agent status to active."""
     agent = await _get_agent_or_404(db, agent_id)
     agent.status = AgentStatus.ACTIVE
+    agent.current_version += 1
+    db.add(
+        AgentVersion(
+            agent_id=agent.id,
+            version=agent.current_version,
+            change_note="Published",
+            config_snapshot=_agent_to_snapshot(agent),
+        )
+    )
     await db.commit()
     await db.refresh(agent)
     return _serialize_detail(agent)
 
 
 # ── Versioning ───────────────────────────────────────────────────────
+
 
 @router.get("/{agent_id}/versions")
 async def list_versions(
@@ -391,6 +417,7 @@ async def rollback_agent(
 
 # ── Analytics ────────────────────────────────────────────────────────
 
+
 @router.get("/{agent_id}/analytics")
 async def get_analytics(
     agent_id: str,
@@ -398,7 +425,7 @@ async def get_analytics(
 ) -> dict:
     agent = await _get_agent_or_404(db, agent_id)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=today_start.weekday())
 
@@ -429,6 +456,34 @@ async def get_analytics(
     )
     avg_duration = avg_dur_q.scalar() or 0
 
+    latency_rows = await db.execute(
+        select(CallLog.turn_latencies).where(CallLog.agent_id == agent.id)
+    )
+    turn_totals: list[float] = []
+    for (latencies,) in latency_rows.all():
+        if isinstance(latencies, list):
+            turn_totals.extend(float(value) for value in latencies)
+
+    breakdown_rows = await db.execute(
+        select(Message.latency_breakdown)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .where(Conversation.agent_id == str(agent.id), Message.latency_breakdown.is_not(None))
+    )
+    stages: dict[str, list[float]] = {
+        "stt_ms": [],
+        "llm_first_token_ms": [],
+        "tts_first_byte_ms": [],
+        "total_ms": [],
+    }
+    for (breakdown,) in breakdown_rows.all():
+        if not isinstance(breakdown, dict):
+            continue
+        for key in stages:
+            if breakdown.get(key) is not None:
+                stages[key].append(float(breakdown[key]))
+    if not turn_totals:
+        turn_totals = stages["total_ms"]
+
     return {
         "total_calls": agent.total_calls,
         "total_duration_ms": agent.total_duration_ms,
@@ -437,8 +492,10 @@ async def get_analytics(
         "calls_today": calls_today,
         "calls_this_week": calls_week,
         "top_intents": [],
-        "latency_p50_ms": 0,
-        "latency_p95_ms": 0,
+        "latency_p50_ms": round(percentile(turn_totals, 50), 1),
+        "latency_p95_ms": round(percentile(turn_totals, 95), 1),
+        "stage_p50_ms": {key: round(percentile(values, 50), 1) for key, values in stages.items()},
+        "stage_p95_ms": {key: round(percentile(values, 95), 1) for key, values in stages.items()},
         "recent_calls": [
             {
                 "id": str(c.id),
@@ -458,6 +515,7 @@ async def get_analytics(
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
+
 
 async def _get_agent_or_404(db: AsyncSession, agent_id: str) -> Agent:
     try:

@@ -14,19 +14,26 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from alembic import context
 
 # Ensure the backend directory is on sys.path so 'app' is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Import all models so Alembic can detect them for autogenerate
-from app.db.base import Base
-from app.models.conversation import Conversation, Message  # noqa: F401
-from app.models.user import User  # noqa: F401
+# Import all models so Alembic can detect them for autogenerate.
+# These imports follow the sys.path insert on purpose.
+from app.config import get_settings  # noqa: E402
+from app.db.base import Base  # noqa: E402
+from app.models.conversation import Conversation, Message  # noqa: E402, F401
+from app.models.user import User  # noqa: E402, F401
 
 config = context.config
+
+# Keep the password out of alembic.ini. Percent signs must be escaped for ConfigParser.
+_database_url = get_settings().database_url.replace("%", "%%")
+config.set_main_option("sqlalchemy.url", _database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

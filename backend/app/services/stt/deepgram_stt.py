@@ -18,28 +18,28 @@ We run the connection in a background task and feed audio via a queue.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ssl
 import time
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 import websockets
 from deepgram import AsyncDeepgramClient
-from deepgram.listen.v1.types.listen_v1results import ListenV1Results
-from deepgram.listen.v1.types.listen_v1utterance_end import ListenV1UtteranceEnd
-from deepgram.listen.v1.types.listen_v1speech_started import ListenV1SpeechStarted
 from deepgram.listen.v1.types.listen_v1metadata import ListenV1Metadata
+from deepgram.listen.v1.types.listen_v1results import ListenV1Results
+from deepgram.listen.v1.types.listen_v1speech_started import ListenV1SpeechStarted
+from deepgram.listen.v1.types.listen_v1utterance_end import ListenV1UtteranceEnd
 
 from app.config import get_settings
 from app.core.logging import get_logger
-
-if TYPE_CHECKING:
-    pass
 
 logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Custom async transport that disables SSL verification (ZScaler proxy bypass)
+# Optional transport that skips TLS verification.
+# Used only when INSECURE_SKIP_TLS_VERIFY=true (intercepting proxies).
 # ---------------------------------------------------------------------------
 _no_verify_ssl_ctx = ssl.create_default_context()
 _no_verify_ssl_ctx.check_hostname = False
@@ -52,8 +52,7 @@ class _NoVerifySSLTransport:
     Satisfies deepgram.transport_interface.AsyncTransport protocol:
       async send(data), async recv(), __aiter__(), async close()
 
-    Required for corporate proxies (e.g. ZScaler) that intercept TLS and
-    present their own certificate, which causes validation failures.
+    Only constructed when insecure_skip_tls_verify is enabled.
     """
 
     def __init__(self, url: str, headers: dict):
@@ -85,7 +84,7 @@ class _NoVerifySSLTransport:
         try:
             return await self._ws.recv()
         except websockets.exceptions.ConnectionClosed:
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
     async def close(self) -> None:
         if self._ws is not None:
@@ -113,11 +112,13 @@ class DeepgramSTTSession:
         session_id: str,
         on_transcript_partial: Callable[[str, float], Coroutine[Any, Any, None]],
         on_transcript_final: Callable[[str, float, bool], Coroutine[Any, Any, None]],
+        on_speech_started: Callable[[], Coroutine[Any, Any, None]] | None = None,
         on_error: Callable[[str], Coroutine[Any, Any, None]] | None = None,
     ) -> None:
         self.session_id = session_id
         self._on_transcript_partial = on_transcript_partial
         self._on_transcript_final = on_transcript_final
+        self._on_speech_started = on_speech_started
         self._on_error = on_error
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=500)
         self._task: asyncio.Task | None = None
@@ -128,6 +129,7 @@ class DeepgramSTTSession:
         self._last_final_text: str = ""
         self._last_final_confidence: float = 0.0
         self._last_final_fired: bool = True  # True = already sent to LLM
+        self.last_audio_at: float = 0.0
 
     async def start(self) -> None:
         """Open a live transcription connection to Deepgram."""
@@ -149,14 +151,13 @@ class DeepgramSTTSession:
         """Queue PCM16 audio bytes for sending to Deepgram (non-blocking)."""
         if not self._started:
             return
+        self.last_audio_at = time.time()
         try:
             self._audio_queue.put_nowait(audio_data)
         except asyncio.QueueFull:
             # Drop oldest chunk to prevent blocking the WS receive loop
-            try:
+            with contextlib.suppress(asyncio.QueueEmpty):
                 self._audio_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
             self._audio_queue.put_nowait(audio_data)
 
     async def stop(self) -> None:
@@ -170,7 +171,7 @@ class DeepgramSTTSession:
         if self._task:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
         duration = round(time.time() - self._start_time, 2) if self._start_time else 0
         logger.info(
@@ -181,61 +182,67 @@ class DeepgramSTTSession:
 
     async def _run(self, settings: Any) -> None:
         """Background task: maintain WebSocket connection, send audio, receive transcripts."""
-        try:
-            client = AsyncDeepgramClient(
-                api_key=settings.deepgram_api_key,
-                transport_factory=_no_verify_ssl_transport,
-            )
-
-            async with client.listen.v1.connect(
-                model=settings.deepgram_model,
-                language=settings.deepgram_language,
-                sample_rate=settings.deepgram_sample_rate,
-                encoding="linear16",
-                channels=1,
-                punctuate=True,
-                interim_results=True,
-                utterance_end_ms=1500,
-                vad_events=True,
-                endpointing=300,
-                smart_format=True,
-            ) as ws:
-                # Start concurrent sender, receiver, and keepalive
-                sender_task = asyncio.create_task(self._sender(ws))
-                receiver_task = asyncio.create_task(self._receiver(ws))
-                keepalive_task = asyncio.create_task(self._keepalive(ws))
-
-                # Wait for either to finish (usually the sender stops first on close)
-                done, pending = await asyncio.wait(
-                    [sender_task, receiver_task, keepalive_task],
-                    return_when=asyncio.FIRST_COMPLETED,
+        attempts = 3
+        delay = 0.3
+        for attempt in range(attempts):
+            try:
+                await self._connect(settings)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(
+                    "deepgram_connection_error",
+                    session_id=self.session_id,
+                    attempt=attempt + 1,
+                    error=str(e),
                 )
+                if self._stop_event.is_set() or attempt >= attempts - 1:
+                    if self._on_error:
+                        await self._on_error(str(e))
+                    return
+                await asyncio.sleep(delay)
+                delay *= 2
 
-                # Cancel the remaining task
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+    async def _connect(self, settings: Any) -> None:
+        client_kwargs: dict[str, Any] = {"api_key": settings.deepgram_api_key}
+        if settings.insecure_skip_tls_verify:
+            logger.warning("deepgram_tls_verification_disabled", session_id=self.session_id)
+            client_kwargs["transport_factory"] = _no_verify_ssl_transport
+        client = AsyncDeepgramClient(**client_kwargs)
 
-                # Check for errors
-                for task in done:
-                    if task.exception():
-                        logger.error(
-                            "deepgram_task_error",
-                            session_id=self.session_id,
-                            error=str(task.exception()),
-                        )
+        async with client.listen.v1.connect(
+            model=settings.deepgram_model,
+            language=settings.deepgram_language,
+            sample_rate=settings.deepgram_sample_rate,
+            encoding="linear16",
+            channels=1,
+            punctuate=True,
+            interim_results=True,
+            utterance_end_ms=1500,
+            vad_events=True,
+            endpointing=300,
+            smart_format=True,
+        ) as ws:
+            sender_task = asyncio.create_task(self._sender(ws))
+            receiver_task = asyncio.create_task(self._receiver(ws))
+            keepalive_task = asyncio.create_task(self._keepalive(ws))
 
-        except Exception as e:
-            logger.error(
-                "deepgram_connection_error",
-                session_id=self.session_id,
-                error=str(e),
+            done, pending = await asyncio.wait(
+                [sender_task, receiver_task, keepalive_task],
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            if self._on_error:
-                await self._on_error(str(e))
+            for task in pending:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            for task in done:
+                if task.exception():
+                    logger.error(
+                        "deepgram_task_error",
+                        session_id=self.session_id,
+                        error=str(task.exception()),
+                    )
 
     async def _keepalive(self, ws: Any) -> None:
         """Send periodic keepalive to prevent Deepgram 1011 timeout."""
@@ -258,7 +265,7 @@ class DeepgramSTTSession:
             while not self._stop_event.is_set():
                 try:
                     chunk = await asyncio.wait_for(self._audio_queue.get(), timeout=0.5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 if chunk is None:
                     break
@@ -267,22 +274,18 @@ class DeepgramSTTSession:
             logger.error("deepgram_sender_error", session_id=self.session_id, error=str(e))
         finally:
             # Signal Deepgram we're done sending
-            try:
+            with contextlib.suppress(Exception):
                 await ws.send_close_stream()
-            except Exception:
-                pass
 
     async def _receiver(self, ws: Any) -> None:
         """Receive transcripts from Deepgram."""
         try:
             while not self._stop_event.is_set():
                 try:
-                    result = await asyncio.wait_for(
-                        ws.recv(), timeout=2.0
-                    )
-                except asyncio.TimeoutError:
+                    result = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                except TimeoutError:
                     continue
-                except Exception as e:
+                except Exception:
                     if self._stop_event.is_set():
                         break
                     raise
@@ -302,6 +305,8 @@ class DeepgramSTTSession:
                     await self._handle_utterance_end()
                 elif isinstance(result, ListenV1SpeechStarted):
                     logger.debug("deepgram_speech_started", session_id=self.session_id)
+                    if self._on_speech_started is not None:
+                        await self._on_speech_started()
                 elif isinstance(result, ListenV1Metadata):
                     logger.debug("deepgram_metadata", session_id=self.session_id)
                 else:

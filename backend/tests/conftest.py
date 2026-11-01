@@ -11,16 +11,30 @@ Provides:
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncGenerator
+import os
+from collections.abc import AsyncGenerator  # noqa: TC003
 
-import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+# Settings are constructed at import time. Provide test credentials before that.
+os.environ.setdefault("APP_ENV", "development")
+os.environ.setdefault("POSTGRES_PASSWORD", "voiceai_dev_password")
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql+asyncpg://voiceai:voiceai_dev_password@localhost:5432/voiceai",
+)
+os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-not-for-production-use")
+os.environ.setdefault("AUTH_ENABLED", "false")
+os.environ.setdefault("INSECURE_SKIP_TLS_VERIFY", "false")
+os.environ.setdefault("LLM_PROVIDER", "fake")
+os.environ.setdefault("TTS_PROVIDER", "fake")
 
-from app.config import get_settings
-from app.db.base import Base
-from app.main import create_app
+import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
+
+from app.config import get_settings  # noqa: E402
+from app.db.base import Base  # noqa: E402
+from app.main import create_app  # noqa: E402
 
 
 @pytest.fixture(scope="session")

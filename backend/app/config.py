@@ -7,12 +7,16 @@ Settings are loaded once at startup and injected via FastAPI's dependency system
 
 from __future__ import annotations
 
+import logging
+import secrets
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 # Root of the backend package (backend/)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -38,15 +42,18 @@ class Settings(BaseSettings):
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     backend_workers: int = 1
-    backend_cors_origins: list[str] = Field(default=["http://localhost:3000"])
+    backend_cors_origins: list[str] = Field(
+        default=["http://localhost:3000", "http://127.0.0.1:3000"]
+    )
 
     # ---- PostgreSQL ----
+    # No password default. Set POSTGRES_PASSWORD or DATABASE_URL (see .env.example).
     postgres_host: str = "localhost"
     postgres_port: int = 5432
-    postgres_user: str = "postgres"
-    postgres_password: str = "123456789"
+    postgres_user: str = "voiceai"
+    postgres_password: str = ""
     postgres_db: str = "voiceai"
-    database_url: str = "postgresql+asyncpg://postgres:123456789@localhost:5432/voiceai"
+    database_url: str = ""
 
     # ---- Redis (optional — uses in-memory store if disabled) ----
     use_redis: bool = False
@@ -55,6 +62,19 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_db: int = 0
     redis_url: str = "redis://localhost:6379/0"
+
+    # ---- LLM provider ----
+    # auto: Azure if a key and endpoint are set, else OpenAI if a key is set, else fake.
+    llm_provider: Literal["auto", "azure", "openai", "fake"] = "auto"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o"
+    llm_timeout_s: float = 20.0
+    llm_max_retries: int = 3
+    tts_timeout_s: float = 15.0
+    tts_max_retries: int = 2
+    tool_timeout_s: float = 8.0
+    # auto uses Edge TTS (no key). fake yields short WAV clips for offline runs.
+    tts_provider: Literal["auto", "edge", "fake"] = "auto"
 
     # ---- Azure OpenAI ----
     azure_openai_api_key: str = ""
@@ -72,12 +92,19 @@ class Settings(BaseSettings):
 
     # ---- Edge TTS (free, no API key) ----
     edge_tts_voice: str = "en-US-AriaNeural"
-    edge_tts_rate: str = "-5%"       # slightly slower for clarity
-    edge_tts_volume: str = "+10%"    # a bit louder for presence
+    edge_tts_rate: str = "-5%"  # slightly slower for clarity
+    edge_tts_volume: str = "+10%"  # a bit louder for presence
     edge_tts_pitch: str = "+0Hz"
 
+    # ---- TLS ----
+    # Off by default. Set true only when an intercepting proxy breaks
+    # Deepgram or Edge TTS certificate checks. Do not enable in production.
+    insecure_skip_tls_verify: bool = False
+
     # ---- JWT Auth ----
-    jwt_secret_key: str = "voiceai-dev-secret-key-change-in-production-2024"
+    # Empty in development generates an ephemeral secret for this process.
+    # Staging and production must set JWT_SECRET_KEY.
+    jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 7
@@ -88,8 +115,55 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
             import json
+
             return json.loads(v)
         return v
+
+    @model_validator(mode="after")
+    def resolve_secrets(self) -> Self:
+        """Require a database credential from the environment.
+
+        JWT may be generated per process in development. Staging and
+        production refuse to start without JWT_SECRET_KEY.
+        """
+        if not self.database_url:
+            if not self.postgres_password:
+                raise ValueError(
+                    "Set DATABASE_URL or POSTGRES_PASSWORD. "
+                    "Copy .env.example to .env for local development."
+                )
+            self.database_url = (
+                f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            )
+
+        if not self.jwt_secret_key:
+            if self.app_env != "development":
+                raise ValueError(
+                    "JWT_SECRET_KEY is required when APP_ENV is staging or production."
+                )
+            self.jwt_secret_key = secrets.token_urlsafe(32)
+            logger.warning(
+                "JWT_SECRET_KEY is unset; generated an ephemeral development secret. "
+                "Tokens will not survive a process restart."
+            )
+        return self
+
+    @property
+    def resolved_llm_provider(self) -> str:
+        if self.llm_provider != "auto":
+            return self.llm_provider
+        if self.azure_openai_api_key and self.azure_openai_endpoint:
+            return "azure"
+        if self.openai_api_key:
+            return "openai"
+        return "fake"
+
+    @property
+    def resolved_tts_provider(self) -> str:
+        if self.tts_provider == "auto":
+            return "edge"
+        return self.tts_provider
 
     @property
     def is_development(self) -> bool:

@@ -1,7 +1,14 @@
-# Environment
+# Environment and secrets
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+credentials.json
+credentials/
+secrets/
 
 # Python
 __pycache__/

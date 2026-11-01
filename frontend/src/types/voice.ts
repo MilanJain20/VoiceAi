@@ -20,6 +20,8 @@ export type WSMessageType =
   | "error"
   | "vad_event"
   | "latency_report"
+  | "audio_sentence_start"
+  | "audio_sentence_end"
   | "tool_call_start"
   | "tool_call_result"
   | "user_transcript";
@@ -41,6 +43,7 @@ export interface LatencyMetrics {
   llm_total_ms: number;
   tts_first_byte_ms: number;
   total_pipeline_ms: number;
+  turn_id?: string;
 }
 
 export interface TranscriptEntry {

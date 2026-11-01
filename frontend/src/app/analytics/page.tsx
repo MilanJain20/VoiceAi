@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { agentApi, type AgentSummary } from "@/lib/api";
+import { agentApi, analyticsApi, type AgentSummary, type AnalyticsOverview } from "@/lib/api";
 
 interface GlobalStats {
   total_agents: number;
@@ -12,12 +12,15 @@ interface GlobalStats {
 
 export default function AnalyticsDashboard() {
   const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [overview, setOverview] = useState<AnalyticsOverview | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    agentApi
-      .list()
-      .then(setAgents)
+    Promise.all([agentApi.list(), analyticsApi.overview().catch(() => null)])
+      .then(([rows, stats]) => {
+        setAgents(rows);
+        setOverview(stats);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
@@ -49,11 +52,16 @@ export default function AnalyticsDashboard() {
         {[
           { label: "Total Agents", value: stats.total_agents, icon: "🤖" },
           { label: "Active Agents", value: stats.active_agents, icon: "✅" },
-          { label: "Total Calls", value: stats.total_calls, icon: "📞" },
+          { label: "Total Calls", value: overview?.total_calls ?? stats.total_calls, icon: "📞" },
           {
-            label: "Total Duration",
-            value: stats.total_duration_min > 0 ? `${Math.round(stats.total_duration_min)}m` : "—",
+            label: "Turn p50",
+            value: overview && overview.turn_count > 0 ? `${overview.latency_p50_ms} ms` : "—",
             icon: "⏱️",
+          },
+          {
+            label: "Turn p95",
+            value: overview && overview.turn_count > 0 ? `${overview.latency_p95_ms} ms` : "—",
+            icon: "📈",
           },
         ].map((stat) => (
           <div

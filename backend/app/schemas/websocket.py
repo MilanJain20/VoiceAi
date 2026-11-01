@@ -39,6 +39,8 @@ class WSMessageType(str, Enum):
     PONG = "pong"
     VAD_EVENT = "vad_event"
     LATENCY_REPORT = "latency_report"
+    AUDIO_SENTENCE_START = "audio_sentence_start"
+    AUDIO_SENTENCE_END = "audio_sentence_end"
 
 
 class WSMessage(BaseModel):

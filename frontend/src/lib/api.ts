@@ -151,3 +151,36 @@ export const agentApi = {
   analytics: (id: string) =>
     request<AgentAnalytics>(`/api/v1/agents/${id}/analytics`),
 };
+
+export interface AnalyticsOverview {
+  total_agents: number;
+  active_agents: number;
+  total_calls: number;
+  total_duration_ms: number;
+  latency_p50_ms: number;
+  latency_p95_ms: number;
+  turn_count: number;
+}
+
+export interface CallRecord {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  session_id: string;
+  duration_ms: number;
+  message_count: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+  p95_latency_ms: number;
+  status: string;
+  rating: number | null;
+  created_at: string | null;
+}
+
+export const analyticsApi = {
+  overview: () => request<AnalyticsOverview>("/api/v1/analytics/overview"),
+};
+
+export const callsApi = {
+  list: () => request<CallRecord[]>("/api/v1/calls"),
+};
